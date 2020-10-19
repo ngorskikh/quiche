@@ -38,6 +38,9 @@ use libc::c_void;
 use libc::size_t;
 use libc::ssize_t;
 
+#[cfg(unix)]
+use libc::timespec;
+
 use crate::*;
 
 #[no_mangle]
@@ -239,6 +242,11 @@ pub extern fn quiche_config_set_cc_algorithm(
 #[no_mangle]
 pub extern fn quiche_config_enable_hystart(config: &mut Config, v: bool) {
     config.enable_hystart(v);
+}
+
+#[no_mangle]
+pub extern fn quiche_config_enable_pacing(config: &mut Config, v: bool) {
+    config.enable_pacing(v);
 }
 
 #[no_mangle]
@@ -544,6 +552,32 @@ pub extern fn quiche_conn_send(
 }
 
 #[no_mangle]
+#[cfg(unix)]
+pub extern fn quiche_conn_send_at(
+    conn: &mut Connection, out: *mut u8, out_len: size_t,
+    send_time: &mut timespec,
+) -> ssize_t {
+    if out_len > <ssize_t>::max_value() as usize {
+        panic!("The provided buffer is too large");
+    }
+
+    let out = unsafe { slice::from_raw_parts_mut(out, out_len) };
+    let mut schedule_time = time::Instant::now();
+
+    let written = match conn.send_at(out, &mut schedule_time) {
+        Ok(v) => v as ssize_t,
+
+        Err(e) => e.to_c(),
+    };
+
+    if written > 0 {
+        *send_time = instant_to_timespec(schedule_time);
+    }
+
+    written
+}
+
+#[no_mangle]
 pub extern fn quiche_conn_stream_recv(
     conn: &mut Connection, stream_id: u64, out: *mut u8, out_len: size_t,
     fin: &mut bool,
@@ -840,4 +874,37 @@ pub extern fn quiche_conn_dgram_purge_outgoing(
 #[no_mangle]
 pub extern fn quiche_conn_free(conn: *mut Connection) {
     unsafe { Box::from_raw(conn) };
+}
+
+#[cfg(unix)]
+fn instant_to_timespec(instant: std::time::Instant) -> timespec {
+    use std::hash::{
+        Hash,
+        Hasher,
+    };
+
+    struct ToTimeSpec(Vec<i64>);
+    impl Hasher for ToTimeSpec {
+        fn finish(&self) -> u64 {
+            unimplemented!();
+        }
+
+        fn write(&mut self, _: &[u8]) {
+            unimplemented!();
+        }
+
+        fn write_u64(&mut self, i: u64) {
+            self.0.push(i as _);
+        }
+
+        fn write_u32(&mut self, i: u32) {
+            self.0.push(i as _);
+        }
+    }
+    let mut hasher = ToTimeSpec(vec![]);
+    instant.hash(&mut hasher);
+    libc::timespec {
+        tv_sec: hasher.0[0] as _,
+        tv_nsec: hasher.0[1] as _,
+    }
 }

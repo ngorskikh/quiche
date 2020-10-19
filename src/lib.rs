@@ -471,6 +471,8 @@ pub struct Config {
 
     hystart: bool,
 
+    pacing: bool,
+
     dgram_recv_max_queue_len: usize,
     dgram_send_max_queue_len: usize,
 
@@ -497,6 +499,7 @@ impl Config {
             grease: true,
             cc_algorithm: CongestionControlAlgorithm::CUBIC,
             hystart: true,
+            pacing: true,
 
             dgram_recv_max_queue_len: DEFAULT_MAX_DGRAM_QUEUE_LEN,
             dgram_send_max_queue_len: DEFAULT_MAX_DGRAM_QUEUE_LEN,
@@ -824,6 +827,13 @@ impl Config {
         };
         self.dgram_recv_max_queue_len = recv_queue_len;
         self.dgram_send_max_queue_len = send_queue_len;
+    }
+
+    /// Configures whether to enable Packet Pacing.
+    ///
+    /// The default is `true`.
+    pub fn enable_pacing(&mut self, v: bool) {
+        self.pacing = v;
     }
 }
 
@@ -2829,6 +2839,72 @@ impl Connection {
         }
 
         Ok(written)
+    }
+
+    /// Writes a single QUIC packet to be sent to the peer and fills in
+    /// send_time of the packet
+    ///
+    /// On success the number of bytes written to the output buffer is
+    /// returned, or [`Done`] if there was nothing to write. And send_time
+    /// is filled with time to send the packet out.
+    ///
+    /// The application should call `send()` multiple times until [`Done`] is
+    /// returned, indicating that there are no more packets to send. The time
+    /// field send_time should be discarded when error is returned. It is
+    /// recommended that `send()` be called in the following cases:
+    ///
+    ///  * When the application receives QUIC packets from the peer (that is,
+    ///    any time [`recv()`] is also called).
+    ///
+    ///  * When the connection timer expires (that is, any time [`on_timeout()`]
+    ///    is also called).
+    ///
+    ///  * When the application sends data to the peer (for examples, any time
+    ///    [`stream_send()`] or [`stream_shutdown()`] are called).
+    ///
+    /// [`Done`]: enum.Error.html#variant.Done
+    /// [`recv()`]: struct.Connection.html#method.recv
+    /// [`on_timeout()`]: struct.Connection.html#method.on_timeout
+    /// [`stream_send()`]: struct.Connection.html#method.stream_send
+    /// [`stream_shutdown()`]: struct.Connection.html#method.stream_shutdown
+    ///
+    /// ## Examples:
+    ///
+    /// ```no_run
+    /// # let mut out = [0; 512];
+    /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    /// # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
+    /// # let scid = [0xba; 16];
+    /// # let mut conn = quiche::accept(&scid, None, &mut config)?;
+    /// # let mut send_time = std::time::Instant::now();
+    /// loop {
+    ///     let write = match conn.send_at(&mut out, &mut send_time) {
+    ///         Ok(v) => v,
+    ///
+    ///         Err(quiche::Error::Done) => {
+    ///             // Done writing.
+    ///             break;
+    ///         },
+    ///
+    ///         Err(e) => {
+    ///             // An error occurred, handle it.
+    ///             break;
+    ///         },
+    ///     };
+    ///
+    ///     // pass send_time to kernel using SO_TXTIME
+    ///     socket.send(&out[..write]).unwrap();
+    /// }
+    /// # Ok::<(), quiche::Error>(())
+    /// ```
+    pub fn send_at(
+        &mut self, out: &mut [u8], send_time: &mut time::Instant,
+    ) -> Result<usize> {
+        let written = self.send(out);
+        if written.is_ok() {
+            *send_time = self.recovery.get_packet_send_time().unwrap();
+        }
+        written
     }
 
     // Returns the maximum size of a packet to be sent.

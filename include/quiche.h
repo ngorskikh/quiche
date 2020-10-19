@@ -257,6 +257,11 @@ ssize_t quiche_conn_recv(quiche_conn *conn, uint8_t *buf, size_t buf_len);
 // Writes a single QUIC packet to be sent to the peer.
 ssize_t quiche_conn_send(quiche_conn *conn, uint8_t *out, size_t out_len);
 
+// Writes a single QUIC packet to be sent to the peer and fills in the send_time
+// of the packet.
+ssize_t quiche_conn_send_at(quiche_conn *conn, uint8_t *out, size_t out_len,
+                            struct timespec *send_time);
+
 // Buffer holding data at a specific offset.
 typedef struct RangeBuf quiche_rangebuf;
 
