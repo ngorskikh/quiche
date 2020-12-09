@@ -383,42 +383,40 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
                             fprintf(stderr, "failed to process headers\n");
                         }
 
+#define CNT(arr_) (sizeof(arr_) / sizeof((arr_)[0]) )
+#define MHDR(name_, value_) { .name = (uint8_t *) (name_), .name_len = strlen(name_), \
+                              .value = (uint8_t *) (value_), .value_len = strlen(value_), }
+
                         quiche_h3_header headers[] = {
-                            {
-                                .name = (const uint8_t *) ":status",
-                                .name_len = sizeof(":status") - 1,
-
-                                .value = (const uint8_t *) "200",
-                                .value_len = sizeof("200") - 1,
-                            },
-
-                            {
-                                .name = (const uint8_t *) "server",
-                                .name_len = sizeof("server") - 1,
-
-                                .value = (const uint8_t *) "quiche",
-                                .value_len = sizeof("quiche") - 1,
-                            },
-
-                            {
-                                .name = (const uint8_t *) "content-length",
-                                .name_len = sizeof("content-length") - 1,
-
-                                .value = (const uint8_t *) "5",
-                                .value_len = sizeof("5") - 1,
-                            },
+                                MHDR(":status", "200"),
+                                MHDR("server", "quiche"),
                         };
 
                         quiche_h3_send_response(conn_io->http3, conn_io->conn,
-                                                s, headers, 3, false);
+                                                s, headers, CNT(headers), false);
 
+                        static const char *body = "hello\n";
                         quiche_h3_send_body(conn_io->http3, conn_io->conn,
-                                            s, (uint8_t *) "byez\n", 5, true);
+                                            s, (uint8_t *) body, strlen(body), false);
                         break;
                     }
 
                     case QUICHE_H3_EVENT_DATA: {
                         fprintf(stderr, "got HTTP data\n");
+
+                        uint8_t buf[4096];
+                        int r;
+                        for (;;) {
+                            r = quiche_h3_recv_body(conn_io->http3, conn_io->conn, s, buf, sizeof(buf));
+                            if (r < 0) {
+                                if (r != QUICHE_ERR_DONE) {
+                                    fprintf(stderr, "quiche_h3_recv: %d", r);
+                                }
+                                break;
+                            }
+                            quiche_h3_send_body(conn_io->http3, conn_io->conn, s, buf, r, false);
+                        }
+
                         break;
                     }
 
@@ -531,7 +529,7 @@ int main(int argc, char *argv[]) {
         (uint8_t *) QUICHE_H3_APPLICATION_PROTOCOL,
         sizeof(QUICHE_H3_APPLICATION_PROTOCOL) - 1);
 
-    quiche_config_set_max_idle_timeout(config, 5000);
+    quiche_config_set_max_idle_timeout(config, UINT32_MAX);
     quiche_config_set_max_recv_udp_payload_size(config, MAX_DATAGRAM_SIZE);
     quiche_config_set_max_send_udp_payload_size(config, MAX_DATAGRAM_SIZE);
     quiche_config_set_initial_max_data(config, 10000000);

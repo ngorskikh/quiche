@@ -23,6 +23,8 @@
 // LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#include <sys/types.h>
+#include <netinet/in.h>
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -48,14 +50,12 @@
 
 struct conn_io {
     ev_timer timer;
-
-    const char *host;
-
+    const char *target_host;
     int sock;
-
     quiche_conn *conn;
-
     quiche_h3_conn *http3;
+    ev_io stdin_watcher;
+    int64_t stream_id;
 };
 
 static void debug_log(const char *line, void *argp) {
@@ -99,6 +99,22 @@ static int for_each_header(uint8_t *name, size_t name_len,
             (int) name_len, name, (int) value_len, value);
 
     return 0;
+}
+
+static void stdin_cb(EV_P_ ev_io *w, int revents) {
+    struct conn_io *conn_io = w->data;
+    uint8_t buf[4096];
+    int r = read(STDIN_FILENO, buf, sizeof(buf));
+    if (r < 0) {
+        perror("failed to read from stdin");
+    }
+    bool fin = (r == 0);
+    int qr = quiche_h3_send_body(conn_io->http3, conn_io->conn, conn_io->stream_id,
+                                 buf, r, fin);
+    if (qr != r) {
+        fprintf(stderr, "quiche_h3_send_body: %d", qr);
+    }
+    flush_egress(loop, conn_io);
 }
 
 static void recv_cb(EV_P_ ev_io *w, int revents) {
@@ -163,53 +179,20 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
 
         quiche_h3_config_free(config);
 
+#define CNT(arr_) (sizeof(arr_) / sizeof((arr_)[0]) )
+#define MHDR(name_, value_) { .name = (uint8_t *) (name_), .name_len = strlen(name_), \
+                              .value = (uint8_t *) (value_), .value_len = strlen(value_), }
+
         quiche_h3_header headers[] = {
-            {
-                .name = (const uint8_t *) ":method",
-                .name_len = sizeof(":method") - 1,
-
-                .value = (const uint8_t *) "GET",
-                .value_len = sizeof("GET") - 1,
-            },
-
-            {
-                .name = (const uint8_t *) ":scheme",
-                .name_len = sizeof(":scheme") - 1,
-
-                .value = (const uint8_t *) "https",
-                .value_len = sizeof("https") - 1,
-            },
-
-            {
-                .name = (const uint8_t *) ":authority",
-                .name_len = sizeof(":authority") - 1,
-
-                .value = (const uint8_t *) conn_io->host,
-                .value_len = strlen(conn_io->host),
-            },
-
-            {
-                .name = (const uint8_t *) ":path",
-                .name_len = sizeof(":path") - 1,
-
-                .value = (const uint8_t *) "/",
-                .value_len = sizeof("/") - 1,
-            },
-
-            {
-                .name = (const uint8_t *) "user-agent",
-                .name_len = sizeof("user-agent") - 1,
-
-                .value = (const uint8_t *) "quiche",
-                .value_len = sizeof("quiche") - 1,
-            },
+            MHDR(":method", "CONNECT"),
+            MHDR(":authority", conn_io->target_host),
+            MHDR("user-agent", "quiche"),
         };
 
-        int64_t stream_id = quiche_h3_send_request(conn_io->http3,
-                                                   conn_io->conn,
-                                                   headers, 5, true);
+        conn_io->stream_id = quiche_h3_send_request(conn_io->http3, conn_io->conn,
+                                                    headers, CNT(headers), false);
 
-        fprintf(stderr, "sent HTTP request %" PRId64 "\n", stream_id);
+        fprintf(stderr, "sent HTTP request %" PRId64 "\n", conn_io->stream_id);
 
         req_sent = true;
     }
@@ -235,6 +218,10 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
                         fprintf(stderr, "failed to process headers");
                     }
 
+                    ev_io_init(&conn_io->stdin_watcher, stdin_cb, STDIN_FILENO, EV_READ);
+                    ev_io_start(loop, &conn_io->stdin_watcher);
+                    conn_io->stdin_watcher.data = conn_io;
+
                     break;
                 }
 
@@ -246,7 +233,7 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
                         break;
                     }
 
-                    printf("%.*s", (int) len, buf);
+                    printf("got HTTP data: %.*s", (int) len, buf);
                     break;
                 }
 
@@ -294,11 +281,16 @@ static void timeout_cb(EV_P_ ev_timer *w, int revents) {
 }
 
 int main(int argc, char *argv[]) {
+    if (argc < 4) {
+        printf("usage: %s <host> <port> <CONNECT authority>", argv[0]);
+        return 0;
+    }
     const char *host = argv[1];
     const char *port = argv[2];
+    const char *target_host = argv[3];
 
     const struct addrinfo hints = {
-        .ai_family = PF_UNSPEC,
+        .ai_family = AF_INET,
         .ai_socktype = SOCK_DGRAM,
         .ai_protocol = IPPROTO_UDP
     };
@@ -337,7 +329,7 @@ int main(int argc, char *argv[]) {
         (uint8_t *) QUICHE_H3_APPLICATION_PROTOCOL,
         sizeof(QUICHE_H3_APPLICATION_PROTOCOL) - 1);
 
-    quiche_config_set_max_idle_timeout(config, 5000);
+    quiche_config_set_max_idle_timeout(config, UINT32_MAX);
     quiche_config_set_max_recv_udp_payload_size(config, MAX_DATAGRAM_SIZE);
     quiche_config_set_max_send_udp_payload_size(config, MAX_DATAGRAM_SIZE);
     quiche_config_set_initial_max_data(config, 10000000);
@@ -382,7 +374,7 @@ int main(int argc, char *argv[]) {
 
     conn_io->sock = sock;
     conn_io->conn = conn;
-    conn_io->host = host;
+    conn_io->target_host = target_host;
 
     ev_io watcher;
 
