@@ -530,8 +530,9 @@ int main(int argc, char *argv[]) {
         sizeof(QUICHE_H3_APPLICATION_PROTOCOL) - 1);
 
     quiche_config_set_max_idle_timeout(config, UINT32_MAX);
-    quiche_config_set_max_recv_udp_payload_size(config, MAX_DATAGRAM_SIZE);
-    quiche_config_set_max_send_udp_payload_size(config, MAX_DATAGRAM_SIZE);
+// master
+//    quiche_config_set_max_recv_udp_payload_size(config, MAX_DATAGRAM_SIZE);
+//    quiche_config_set_max_send_udp_payload_size(config, MAX_DATAGRAM_SIZE);
     quiche_config_set_initial_max_data(config, 10000000);
     quiche_config_set_initial_max_stream_data_bidi_local(config, 1000000);
     quiche_config_set_initial_max_stream_data_bidi_remote(config, 1000000);
